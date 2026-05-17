@@ -1,0 +1,47 @@
+@startuml
+actor "Пользователь" as User
+participant "Spark Cluster" as Spark
+participant "ClickHouse" as CH
+participant "S3 Storage (Hot Tier)" as Hot
+participant "S3 Storage (Warm Tier)" as Warm
+participant "Cold Storage (Archive)" as Cold
+participant "Backup Storage" as Backup
+participant "Backup Service" as BackupSer
+participant "ILM Policy Engine" as ILM
+
+== Запись данных ==
+User -> Hot: Загрузка данных (S3 PUT)
+Hot -> Hot: Сохранение + репликация
+
+== Обработка данных ==
+User -> Spark: Инициация запуска скрипта
+Spark -> Hot: Чтение данных (S3 GET)
+Spark -> Spark: Обработка / трансформация
+Spark -> Hot: Запись результатов
+
+CH -> Hot: Чтение данных
+CH -> CH: Выполнение аналитических запросов
+CH -> Hot: Запись результатов
+
+== Жизненный цикл данных ==
+ILM -> Hot: Проверка возраста данных
+ILM -> Warm: Перемещение данных (>30 дней)
+Warm -> Warm: Хранение
+
+ILM -> Warm: Проверка возраста
+ILM -> Cold: Архивация (>1 года)
+
+== Резервное копирование ==
+BackupSer -> Hot: Инкрементный бэкап (ежедневно)
+BackupSer -> Warm: Дифференциальный бэкап (еженедельно)
+BackupSer -> Hot: Полный бэкап (ежемесячно)
+
+BackupSer -> Backup: Сохранение бэкапов
+
+== Восстановление ==
+Cold -> BackupSer: Запрос на восстановление
+BackupSer -> Hot: Восстановление данных
+BackupSer -> Warm: Восстановление данных
+BackupSer -> Cold: Восстановление данных
+
+@enduml
