@@ -1,47 +1,162 @@
 @startuml
+autonumber
+hide footbox
+
 actor "Пользователь" as User
+
 participant "Spark Cluster" as Spark
 participant "ClickHouse" as CH
-participant "S3 Storage (Hot Tier)" as Hot
-participant "S3 Storage (Warm Tier)" as Warm
-participant "Cold Storage (Archive)" as Cold
+
+participant "S3 Storage\n(Hot Tier)" as Hot
+participant "S3 Storage\n(Warm Tier)" as Warm
+participant "Cold Storage\n(Archive)" as Cold
+
+participant "Backup Service" as BackupService
 participant "Backup Storage" as Backup
-participant "Backup Service" as BackupSer
+
 participant "ILM Policy Engine" as ILM
 
-== Запись данных ==
-User -> Hot: Загрузка данных (S3 PUT)
-Hot -> Hot: Сохранение + репликация
+== Загрузка данных ==
 
-== Обработка данных ==
-User -> Spark: Инициация запуска скрипта
-Spark -> Hot: Чтение данных (S3 GET)
-Spark -> Spark: Обработка / трансформация
-Spark -> Hot: Запись результатов
+User -> Hot : S3 PUT Object
+activate User
+activate Hot
+Hot -> Hot : Репликация данных
+Hot -->> User : ACK успешной записи
+deactivate Hot
+deactivate User
 
-CH -> Hot: Чтение данных
-CH -> CH: Выполнение аналитических запросов
-CH -> Hot: Запись результатов
+== Обработка данных Spark ==
 
-== Жизненный цикл данных ==
-ILM -> Hot: Проверка возраста данных
-ILM -> Warm: Перемещение данных (>30 дней)
-Warm -> Warm: Хранение
+User -> Spark : Запуск задания
+activate User
+activate Spark
 
-ILM -> Warm: Проверка возраста
-ILM -> Cold: Архивация (>1 года)
+Spark -> Hot : S3 GET Object
+activate Hot
+Hot -->> Spark : Data Stream
+deactivate Hot
+
+Spark -> Spark : Обработка / трансформация
+
+Spark -> Hot : S3 PUT Result
+activate Hot
+Hot -->> Spark : ACK записи
+deactivate Hot
+
+Spark -->> User : Статус выполнения
+deactivate Spark
+deactivate User
+
+== Аналитическая обработка ClickHouse ==
+
+User -> CH : Загрузка скрипта
+activate User
+activate CH
+CH -> Hot : Чтение данных
+activate Hot
+Hot -->> CH : Dataset
+deactivate Hot
+
+CH -> CH : Выполнение аналитических запросов
+
+CH -> Hot : Сохранение агрегатов
+activate Hot
+Hot -->> CH : ACK записи
+deactivate Hot
+
+CH -->> User : Результаты запроса
+deactivate CH
+deactivate User
+
+== Политики жизненного цикла (ILM) ==
+
+ILM -> Hot : Проверка возраста данных
+activate ILM
+activate Hot
+Hot -->> ILM : Metadata
+deactivate Hot
+deactivate ILM
+
+ILM -> Hot : Запрос на перемещение данных (>30 дней)
+activate ILM
+activate Hot
+Hot -> Warm : Запись данных на другой уровень
+activate Warm
+Warm -->> Hot : Подтверждение записи
+deactivate Warm
+Hot -->> ILM : ACK migration
+deactivate Hot
+deactivate ILM
+
+ILM -> Warm : Проверка возраста данных
+activate ILM
+activate Warm
+Warm -->> ILM : Metadata
+deactivate Warm
+deactivate ILM
+
+ILM -> Warm : Запрос на перемещение данных (>1 год)
+activate ILM
+activate Warm
+Warm -> Cold : Запись данных на другой уровень
+activate Cold
+Cold -->> Warm : Подтверждение записи
+deactivate Cold
+Warm -->> ILM : ACK migration
+deactivate Warm
+deactivate ILM
 
 == Резервное копирование ==
-BackupSer -> Hot: Инкрементный бэкап (ежедневно)
-BackupSer -> Warm: Дифференциальный бэкап (еженедельно)
-BackupSer -> Hot: Полный бэкап (ежемесячно)
 
-BackupSer -> Backup: Сохранение бэкапов
+BackupService -> BackupService : Ожидание таймера и выхода пользователя
+activate BackupService
+
+alt Инкрементальный backup
+    BackupService -> Hot : Запрос инкрементального бэкапа
+    activate Hot
+    Hot -->> BackupService : Incremental Backup Data
+    deactivate Hot
+else Дифференциальный backup
+    BackupService -> Hot : Запрос дифференциального бэкапа
+    activate Hot
+    Hot --> BackupService : Differential Backup Data
+    deactivate Hot
+else Полный backup
+    BackupService -> Hot : Запрос полного бэкапа
+    activate Hot
+    Hot --> BackupService : Full Backup Data
+    deactivate Hot
+end
+
+BackupService -> Backup : Сохранение backup
+activate Backup
+Backup --> BackupService : Подтверждение записи
+deactivate Backup
+deactivate BackupService
 
 == Восстановление ==
-Cold -> BackupSer: Запрос на восстановление
-BackupSer -> Hot: Восстановление данных
-BackupSer -> Warm: Восстановление данных
-BackupSer -> Cold: Восстановление данных
+
+BackupService -> Backup : Получение backup
+activate BackupService
+activate Backup
+Backup -->> BackupService : Backup Archive
+deactivate Backup
+
+BackupService -> Hot : Восстановление Hot данных
+activate Hot
+Hot -->> BackupService : ACK restore
+deactivate Hot
+
+BackupService -> Warm : Восстановление Warm данных
+activate Warm
+Warm -->> BackupService : ACK restore
+deactivate Warm
+
+BackupService -> Cold : Восстановление Archive
+activate Cold
+Cold -->> BackupService : ACK restore
+deactivate Cold
+deactivate BackupService
 
 @enduml
